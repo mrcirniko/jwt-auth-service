@@ -39,7 +39,7 @@ services:
 
   worker:
     build: .
-    restart: always  # <-- Автозапуск при падении контейнера
+    restart: always
     depends_on:
       - rabbitmq
     env_file: 
