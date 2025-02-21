@@ -1,0 +1,19 @@
+<!-- templates/login.html -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Вход</title>
+</head>
+<body>
+    <h2>Вход</h2>
+    <form action="/login" method="post">
+        <label>Email: <input type="text" name="username" required></label><br>
+        <label>Пароль: <input type="password" name="password" required></label><br>
+        <button type="submit">Войти</button>
+    </form>
+    <a href="/register">Создать аккаунт</a>
+    <br>
+    <a href="https://oauth.yandex.ru/authorize?response_type=code&client_id={{ yandex_client_id }}">Войти через Яндекс</a>
+</body>
+</html>

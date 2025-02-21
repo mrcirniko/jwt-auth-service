@@ -1,0 +1,17 @@
+<!-- templates/history.html -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>История посещений</title>
+</head>
+<body>
+    <h2>История посещений</h2>
+    <ul>
+        {% for record in history %}
+            <li>{{ record.timestamp }} - {{ record.ip_address }}</li>
+        {% endfor %}
+    </ul>
+    <a href="/login">Назад</a>
+</body>
+</html>
