@@ -31,7 +31,6 @@ async def get_chat_id(username: str):
 
 
 async def process_message(message: aio_pika.IncomingMessage):
-    """Обработка входящего сообщения из RabbitMQ."""
     async with message.process():
         body = message.body.decode()
         print(f"📩 Получено сообщение: {body}")
