@@ -104,7 +104,7 @@ async def register(email: str = Form(...), password: str = Form(...)):
     
     try:
         await conn.execute("INSERT INTO users (email, password) VALUES ($1, $2)", email, hashed_password)
-        user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)  # Переместил внутрь try
+        user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)
     except asyncpg.UniqueViolationError:
         await conn.close()
         raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
@@ -258,7 +258,6 @@ async def save_telegram_username(
     telegram_username: str = Form(...),
     token: str = Depends(oauth2_scheme)
 ):
-    """Сохранение Telegram-юзернейма и отправка данных в RabbitMQ."""
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
