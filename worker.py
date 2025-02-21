@@ -10,7 +10,6 @@ RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 async def get_chat_id(username: str):
-    """Преобразует username в chat_id, если не получается — ищет через getUpdates()."""
     try:
         user = await bot.get_chat(username)
         print(f"✅ Найден chat_id {user.id} для {username}")
@@ -18,7 +17,6 @@ async def get_chat_id(username: str):
     except exceptions.TelegramBadRequest:
         print(f"❌ {username} не найден через get_chat(). Проверяю getUpdates()...")
 
-    # Пробуем получить chat_id через getUpdates
     try:
         updates = await bot.get_updates()
         for update in updates:
@@ -55,8 +53,7 @@ async def process_message(message: aio_pika.IncomingMessage):
 
 
 async def main():
-    """Основной цикл воркера."""
-    print("📡 Worker started. Connecting to RabbitMQ...")
+    print("Worker started. Connecting to RabbitMQ...")
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
     channel = await connection.channel()
 
@@ -66,7 +63,7 @@ async def main():
     print("📡 Worker listening for messages...")
 
     while True:
-        await asyncio.sleep(1)  # Бесконечный цикл для стабильности
+        await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
