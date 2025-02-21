@@ -9,12 +9,11 @@ from dotenv import load_dotenv
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-from passlib.context import CryptContext  # Для хеширования пароля
+from passlib.context import CryptContext
 import aio_pika
 
 
 
-# Загрузка переменных окружения
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -27,21 +26,17 @@ RABBITMQ_URL = "amqp://guest:guest@rabbitmq/"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Инициализация хешера паролей
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# FastAPI и шаблоны
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
-# Подключение к БД
 async def connect_db():
     return await asyncpg.connect(DATABASE_URL)
 
-# Инициализация БД
 async def init_db():
     conn = await connect_db()
     await conn.execute("""
@@ -65,7 +60,6 @@ async def init_db():
 async def startup():
     await init_db()
 
-# Функции для работы с JWT
 def create_access_token(data: dict, expires_delta: timedelta = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
@@ -85,7 +79,7 @@ async def send_to_rabbitmq(user_id: int, telegram_username: str):
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
     channel = await connection.channel()
 
-    queue_name = "telegram_queue"  # Должно совпадать с воркером
+    queue_name = "telegram_queue"
     message_body = f"{user_id},{telegram_username}"
 
     await channel.default_exchange.publish(
@@ -96,7 +90,6 @@ async def send_to_rabbitmq(user_id: int, telegram_username: str):
 
     await connection.close()
 
-# Регистрация
 @app.get("/register")
 async def register_form(request: Request):
     return templates.TemplateResponse("register.html", {"request": request})
@@ -124,7 +117,6 @@ async def register(email: str = Form(...), password: str = Form(...)):
 
 
 
-# Авторизация
 @app.get("/login")
 async def login_form(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "yandex_client_id": YANDEX_CLIENT_ID})
@@ -137,18 +129,14 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     if not user or not pwd_context.verify(form_data.password, user["password"]):
         raise HTTPException(status_code=400, detail="Неверные учетные данные")
 
-    # Создаем токен
     token = create_access_token({"sub": user["email"]})
 
-    # Записываем историю входа
     conn = await connect_db()
     await conn.execute("INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", user["id"], "127.0.0.1")
     await conn.close()
 
-    # Перенаправляем на страницу истории
     return RedirectResponse(url=f"/login-history?token={token}")
 
-# Получение информации о пользователе
 @app.get("/users/me")
 async def read_users_me(token: str = Depends(oauth2_scheme)):
     payload = verify_token(token)
@@ -165,15 +153,12 @@ async def read_users_me(token: str = Depends(oauth2_scheme)):
     
     return {"email": user["email"]}
 
-# История входов
 @app.get("/login-history")
 async def login_history(request: Request):
-    # Получаем токен из параметра URL
     token = request.query_params.get("token")
     if not token:
         raise HTTPException(status_code=401, detail="Token is missing")
 
-    # Проверяем токен
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -189,7 +174,6 @@ async def login_history(request: Request):
 
     return templates.TemplateResponse("history.html", {"request": request, "history": history})
 
-# Авторизация через Яндекс
 @app.get("/auth/yandex")
 async def auth_callback(code: str):
     response = requests.post(
@@ -219,21 +203,18 @@ async def auth_callback(code: str):
     user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", user_email)
 
     if user:
-        # Если пользователь есть, записываем вход в login_history
         await conn.execute(
             "INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", 
             user["id"], "127.0.0.1"
         )
         await conn.close()
 
-        # Создаем токен
         token = create_access_token({"sub": user_email})
 
         return RedirectResponse(url=f"/login-history?token={token}")
 
     await conn.close()
 
-    # Если пользователя нет, перенаправляем на установку пароля
     return RedirectResponse(url=f"/set-password?email={user_email}")
 
 
@@ -251,21 +232,17 @@ async def set_password(email: str = Form(...), password: str = Form(...), confir
 
     conn = await connect_db()
 
-    # Проверяем, есть ли уже пользователь с таким email
     existing_user = await conn.fetchrow("SELECT id FROM users WHERE email = $1", email)
     
     if existing_user:
         raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
     
-    # Создаем нового пользователя
     user_id = await conn.fetchval("INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id", email, hashed_password)
 
-    # Записываем вход в login_history
     await conn.execute("INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", user_id, "127.0.0.1")
     
     await conn.close()
 
-    # Создаем токен
     token = create_access_token({"sub": email})
 
     return RedirectResponse(url=f"/login-history?token={token}", status_code=303)
