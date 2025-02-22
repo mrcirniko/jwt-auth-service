@@ -44,14 +44,39 @@ async def init_db():
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password TEXT,
-            telegram_username TEXT UNIQUE
+            telegram_username TEXT UNIQUE,
+            role TEXT NOT NULL DEFAULT 'user'
         );
+
         CREATE TABLE IF NOT EXISTS login_history (
             id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(id),
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             ip_address TEXT
         );
+
+        DO $$ 
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'trigger_delete_user_history'
+            ) THEN
+                DROP TRIGGER trigger_delete_user_history ON users;
+            END IF;
+        END $$;
+
+        CREATE OR REPLACE FUNCTION delete_user_history() RETURNS TRIGGER AS $$
+        BEGIN
+            DELETE FROM login_history WHERE user_id = OLD.id;
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trigger_delete_user_history
+        BEFORE DELETE ON users
+        FOR EACH ROW
+        EXECUTE FUNCTION delete_user_history();
     """)
     await conn.close()
 
@@ -95,27 +120,44 @@ async def register_form(request: Request):
     return templates.TemplateResponse("register.html", {"request": request})
 
 @app.post("/register")
-async def register(email: str = Form(...), password: str = Form(...)):
+async def register(
+    email: str = Form(...),
+    password: str = Form(...),
+    telegram_username: str = Form(...)
+):
     if not password:
         raise HTTPException(status_code=400, detail="Пароль не может быть пустым")
 
     hashed_password = pwd_context.hash(password)
+
     conn = await connect_db()
     
     try:
-        await conn.execute("INSERT INTO users (email, password) VALUES ($1, $2)", email, hashed_password)
-        user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)
+        await conn.execute(
+            "INSERT INTO users (email, password, telegram_username, role) VALUES ($1, $2, $3, $4)",
+            email, hashed_password, telegram_username, "user"
+        )
+        
+        user = await conn.fetchrow("SELECT id FROM users WHERE email=$1", email)
+        if not user:
+            raise HTTPException(status_code=500, detail="Ошибка при создании пользователя")
+
+        await conn.execute(
+            "INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)",
+            user["id"], "127.0.0.1"
+        )
+
+        await send_to_rabbitmq(user["id"], telegram_username)
+
     except asyncpg.UniqueViolationError:
         await conn.close()
         raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
 
-    await conn.execute("INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", user["id"], "127.0.0.1")
-    await conn.close()
+    finally:
+        await conn.close()
 
     token = create_access_token({"sub": email})
     return RedirectResponse(url=f"/login-history?token={token}", status_code=303)
-
-
 
 @app.get("/login")
 async def login_form(request: Request):
@@ -135,23 +177,10 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     await conn.execute("INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", user["id"], "127.0.0.1")
     await conn.close()
 
-    return RedirectResponse(url=f"/login-history?token={token}")
-
-@app.get("/users/me")
-async def read_users_me(token: str = Depends(oauth2_scheme)):
-    payload = verify_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    email = payload.get("sub")
-    conn = await connect_db()
-    user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)
-    await conn.close()
-
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    
-    return {"email": user["email"]}
+    if user["role"] == "admin":
+        return RedirectResponse(url=f"/admin?token={token}")
+    else:
+        return RedirectResponse(url=f"/login-history?token={token}")
 
 @app.get("/login-history")
 async def login_history(request: Request):
@@ -211,7 +240,10 @@ async def auth_callback(code: str):
 
         token = create_access_token({"sub": user_email})
 
-        return RedirectResponse(url=f"/login-history?token={token}")
+        if user["role"] == "admin":
+            return RedirectResponse(url=f"/admin?token={token}")
+        else:
+            return RedirectResponse(url=f"/login-history?token={token}")
 
     await conn.close()
 
@@ -224,7 +256,12 @@ async def set_password_form(request: Request, email: str):
     return templates.TemplateResponse("set_password.html", {"request": request, "email": email})
 
 @app.post("/set-password")
-async def set_password(email: str = Form(...), password: str = Form(...), confirm_password: str = Form(...)):
+async def set_password(
+    email: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    telegram_username: str = Form(...)
+):
     if password != confirm_password:
         raise HTTPException(status_code=400, detail="Пароли не совпадают")
 
@@ -237,46 +274,117 @@ async def set_password(email: str = Form(...), password: str = Form(...), confir
     if existing_user:
         raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
     
-    user_id = await conn.fetchval("INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id", email, hashed_password)
+    user_id = await conn.fetchval(
+        "INSERT INTO users (email, password, telegram_username, role) VALUES ($1, $2, $3, $4) RETURNING id",
+        email, hashed_password, telegram_username, "user"
+    )
 
     await conn.execute("INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", user_id, "127.0.0.1")
     
+    await send_to_rabbitmq(user_id, telegram_username)
+
     await conn.close()
 
     token = create_access_token({"sub": email})
 
     return RedirectResponse(url=f"/login-history?token={token}", status_code=303)
 
+@app.get("/admin")
+async def admin_panel(request: Request, token: str = None):
+    if not token:
+        token = request.headers.get("Authorization")
+        if token:
+            token = token.split("Bearer ")[-1]
 
-@app.get("/telegram")
-async def telegram_form(request: Request):
-    return templates.TemplateResponse("telegram.html", {"request": request})
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
 
-@app.post("/telegram")
-async def save_telegram_username(
-    request: Request,
-    telegram_username: str = Form(...),
-    token: str = Depends(oauth2_scheme)
-):
     payload = verify_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     email = payload.get("sub")
     conn = await connect_db()
-    
+    user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+
+    users = await conn.fetch("SELECT * FROM users")
+    await conn.close()
+
+    return templates.TemplateResponse("admin.html", {"request": request, "users": users})
+
+@app.post("/admin/delete-user")
+async def delete_user(
+    user_id: int = Form(...),
+    token: str = Form(...)
+):
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    email = payload.get("sub")
+    conn = await connect_db()
+    user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+
+    await conn.execute("DELETE FROM users WHERE id=$1", user_id)
+    await conn.close()
+
+    return RedirectResponse(url=f"/admin?token={token}", status_code=303)
+
+@app.post("/admin/add-user")
+async def add_user(
+    email: str = Form(...),
+    password: str = Form(...),
+    telegram_username: str = Form(...),
+    role: str = Form(...),
+    token: str = Form(...)
+):
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    admin_email = payload.get("sub")
+    conn = await connect_db()
+    admin = await conn.fetchrow("SELECT * FROM users WHERE email=$1", admin_email)
+    if not admin or admin["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+
+    if not password:
+        raise HTTPException(status_code=400, detail="Пароль не может быть пустым")
+
+    hashed_password = pwd_context.hash(password)
+
     try:
+        await conn.execute(
+            "INSERT INTO users (email, password, telegram_username, role) VALUES ($1, $2, $3, $4)",
+            email, hashed_password, telegram_username, role
+        )
+        
         user = await conn.fetchrow("SELECT id FROM users WHERE email=$1", email)
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=500, detail="Ошибка при создании пользователя")
 
         await conn.execute(
-            "UPDATE users SET telegram_username=$1 WHERE email=$2",
-            telegram_username, email
+            "INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)",
+            user["id"], "127.0.0.1"
         )
+
         await send_to_rabbitmq(user["id"], telegram_username)
+
+    except asyncpg.UniqueViolationError:
+        await conn.close()
+        raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
 
     finally:
         await conn.close()
 
-    return {"message": "Telegram username сохранен!"}
+    return RedirectResponse(url=f"/admin?token={token}", status_code=303)

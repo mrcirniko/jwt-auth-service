@@ -47,6 +47,7 @@ services:
     environment:
       DATABASE_URL: postgresql://myuser:mypassword@db/mydatabase
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      TELEGRAM_BOT_TOKEN: 8140875447:AAHq9eSAZVv4KvEWLOVT6KKdzz00Pa8lLws
     command: ["python3", "worker.py"]
     volumes:
       - .:/app

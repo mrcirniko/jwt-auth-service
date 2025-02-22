@@ -52,7 +52,7 @@ async def process_message(message: aio_pika.IncomingMessage):
 
 
 async def main():
-    print("Worker started. Connecting to RabbitMQ...")
+    print("📡 Worker started. Connecting to RabbitMQ...")
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
     channel = await connection.channel()
 
