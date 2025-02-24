@@ -95,9 +95,20 @@ def verify_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except JWTError:
+    except JWTError as e:
+        print(f"JWT Error: {e}")
         return None
 
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    
+    return email
 
 async def send_to_rabbitmq(user_id: int, telegram_username: str):
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
@@ -246,47 +257,65 @@ async def auth_callback(code: str):
 
     await conn.close()
 
-    return RedirectResponse(url=f"/set-password?email={user_email}")
+    temp_token = create_access_token({"sub": user_email}, timedelta(minutes=15))
+
+    return RedirectResponse(url=f"/set-password?token={temp_token}")
+
 
 
 
 @app.get("/set-password")
-async def set_password_form(request: Request, email: str):
-    return templates.TemplateResponse("set_password.html", {"request": request, "email": email})
+async def set_password_form(request: Request, token: str):
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return templates.TemplateResponse("set_password.html", {"request": request, "token": token})
+
 
 @app.post("/set-password")
 async def set_password(
-    email: str = Form(...),
+    token: str = Form(...),
     password: str = Form(...),
     confirm_password: str = Form(...),
     telegram_username: str = Form(...)
 ):
+    payload = verify_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    email = payload.get("sub")
+
     if password != confirm_password:
-        raise HTTPException(status_code=400, detail="Пароли не совпадают")
+        raise HTTPException(status_code=400, detail="Passwords do not match")
 
     hashed_password = pwd_context.hash(password)
 
     conn = await connect_db()
+    user = await conn.fetchrow("SELECT * FROM users WHERE email=$1", email)
 
-    existing_user = await conn.fetchrow("SELECT id FROM users WHERE email = $1", email)
-    
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
-    
-    user_id = await conn.fetchval(
-        "INSERT INTO users (email, password, telegram_username, role) VALUES ($1, $2, $3, $4) RETURNING id",
-        email, hashed_password, telegram_username, "user"
+    if user:
+        raise HTTPException(status_code=400, detail="User already exists")
+
+    await conn.execute(
+        "INSERT INTO users (email, password, telegram_username, role) VALUES ($1, $2, $3, 'user')",
+        email, hashed_password, telegram_username
     )
 
-    await conn.execute("INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)", user_id, "127.0.0.1")
-    
+    user = await conn.fetchrow("SELECT id FROM users WHERE email=$1", email)
+    user_id = user["id"]
+
     await send_to_rabbitmq(user_id, telegram_username)
 
     await conn.close()
 
-    token = create_access_token({"sub": email})
+    new_token = create_access_token({"sub": email})
+    return RedirectResponse(url=f"/login-history?token={new_token}", status_code=303)
 
-    return RedirectResponse(url=f"/login-history?token={token}", status_code=303)
+
+@app.get("/protected")
+async def protected_route(current_user: str = Depends(get_current_user)):
+    return {"message": "Access granted", "user": current_user}
 
 @app.get("/admin")
 async def admin_panel(request: Request, token: str = None):
