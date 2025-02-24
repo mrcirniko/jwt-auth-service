@@ -100,7 +100,6 @@ def verify_token(token: str):
 
 
 async def send_to_rabbitmq(user_id: int, telegram_username: str):
-    """Отправка данных в очередь RabbitMQ."""
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
     channel = await connection.channel()
 
@@ -111,7 +110,7 @@ async def send_to_rabbitmq(user_id: int, telegram_username: str):
         aio_pika.Message(body=message_body.encode()),
         routing_key=queue_name,
     )
-    print(f"📤 Отправлено в очередь {queue_name}: {message_body}")
+    print(f"Отправлено в очередь {queue_name}: {message_body}")
 
     await connection.close()
 
